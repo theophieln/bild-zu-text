@@ -1,20 +1,24 @@
 # Bild zu Text
 
-macOS-Menüleisten-App: Screenshot in der Zwischenablage → **Linksklick** aufs Icon →
-erkannter Text liegt in der Zwischenablage. OCR läuft lokal (Apple Vision, DE + EN).
+- Bild aus der Zwischenablage → Klick aufs Icon → Text kopiert
+- Lokal · Apple Vision · Deutsch / Englisch
+- Rechtsklick: Schließen
 
-- **Linksklick** aufs Icon: Bild → Text (`✓` fertig, `✗` kein Bild/Text)
-- **Rechtsklick**: Schließen
+## Installation
+
+- [DMG herunterladen](https://github.com/theophieln/bild-zu-text/releases/latest) · Apple Silicon · macOS 13+
+- App nach Programme ziehen
+- Nicht notarisiert · Falls blockiert: Systemeinstellungen → Datenschutz & Sicherheit → Dennoch öffnen
 
 ## Bauen
 
-```bash
-./build.sh        # erzeugt "Bild zu Text.app"
+- Apple Command Line Tools · Swift 6
+
+```sh
+./build.sh
+./test.sh
+./release.sh
 ```
 
-Die App liegt danach im Projektordner – per Doppelklick starten oder nach „Programme" ziehen.
-Erster Start: **Rechtsklick → „Öffnen"** (macOS-Warnung).
-
-## Lizenz
-
-MIT – siehe [LICENSE](LICENSE).
+- App: `build/Bild zu Text.app` · DMG: `dist/Bild-zu-Text.dmg`
+- [MIT](LICENSE)

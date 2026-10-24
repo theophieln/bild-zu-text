@@ -1,124 +1,132 @@
 import Cocoa
-import Vision
 
-class AppDelegate: NSObject, NSApplicationDelegate {
-    var statusItem: NSStatusItem!
-    var defaultImage: NSImage!
-    var busy = false
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var statusItem: NSStatusItem!
+    private let defaultImage = NSImage(systemSymbolName: "text.viewfinder",
+                                       accessibilityDescription: "Bild zu Text")
+    private let defaultTooltip = "Klick: Bild aus Zwischenablage in Text umwandeln"
+    private var busy = false
+    private var feedbackTask: Task<Void, Never>?
+    private var ocrTask: Task<Void, Never>?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        defaultImage = NSImage(systemSymbolName: "text.viewfinder",
-                               accessibilityDescription: "Bild zu Text")
         if let button = statusItem.button {
             button.image = defaultImage
             button.target = self
             button.action = #selector(statusClicked(_:))
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-            button.toolTip = "Klick: Bild aus Zwischenablage in Text umwandeln"
+            button.toolTip = defaultTooltip
         }
     }
 
-    @objc func statusClicked(_ sender: Any?) {
-        guard let event = NSApp.currentEvent else { runOCR(); return }
-        if event.type == .rightMouseUp {
+    @objc private func statusClicked(_ sender: Any?) {
+        if NSApp.currentEvent?.type == .rightMouseUp {
             showMenu()
         } else {
             runOCR()
         }
     }
 
-    func showMenu() {
+    private func showMenu() {
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Schließen",
-                                action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        let quit = NSMenuItem(title: "Schließen", action: #selector(NSApplication.terminate(_:)),
+                              keyEquivalent: "q")
+        quit.target = NSApp
+        menu.addItem(quit)
         statusItem.menu = menu
         statusItem.button?.performClick(nil)
         statusItem.menu = nil
     }
 
-    @objc func runOCR() {
-        if busy { return }
-        guard let cgImage = imageFromPasteboard() else {
-            flash(symbol: "xmark.circle.fill", tooltip: "Kein Bild in der Zwischenablage")
+    private func runOCR() {
+        guard !busy else { return }
+        let pasteboard = NSPasteboard.general
+        let changeCount = pasteboard.changeCount
+        guard let image = imageFromPasteboard(pasteboard) else {
+            if #available(macOS 15.4, *), pasteboard.accessBehavior == .alwaysDeny {
+                flash(symbol: "xmark.circle.fill", tooltip: "Zugriff auf Zwischenablage nicht erlaubt")
+            } else {
+                flash(symbol: "xmark.circle.fill", tooltip: "Kein Bild in der Zwischenablage")
+            }
             NSSound.beep()
             return
         }
         busy = true
-        setIcon(symbol: "ellipsis.circle")
+        feedbackTask?.cancel()
+        statusItem.button?.image = NSImage(systemSymbolName: "ellipsis.circle",
+                                           accessibilityDescription: "Text wird erkannt")
+        statusItem.button?.toolTip = "Text wird erkannt …"
 
-        let request = VNRecognizeTextRequest { [weak self] req, err in
-            guard let self = self else { return }
-            var text = ""
-            if err == nil, let obs = req.results as? [VNRecognizedTextObservation] {
-                let sorted = obs.sorted { a, b in
-                    if abs(a.boundingBox.midY - b.boundingBox.midY) > 0.012 {
-                        return a.boundingBox.midY > b.boundingBox.midY
-                    }
-                    return a.boundingBox.minX < b.boundingBox.minX
-                }
-                text = sorted.compactMap { $0.topCandidates(1).first?.string }
-                             .joined(separator: "\n")
-            }
-            DispatchQueue.main.async {
-                self.busy = false
-                if text.isEmpty {
-                    self.flash(symbol: "xmark.circle.fill", tooltip: "Kein Text erkannt")
+        ocrTask = Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                Result { try OCR.recognize(image) }
+            }.value
+            guard let self, !Task.isCancelled else { return }
+            self.busy = false
+            self.ocrTask = nil
+            switch result {
+            case .failure(let error):
+                self.flash(symbol: "xmark.circle.fill",
+                           tooltip: "Texterkennung fehlgeschlagen: \(error.localizedDescription)")
+                NSSound.beep()
+            case .success(let text) where text.isEmpty:
+                self.flash(symbol: "xmark.circle.fill", tooltip: "Kein Text erkannt")
+                NSSound.beep()
+            case .success(let text):
+                switch Clipboard.copy(text, to: pasteboard, unchangedSince: changeCount) {
+                case .copied:
+                    self.flash(symbol: "checkmark.circle.fill", tooltip: "Text in Zwischenablage kopiert")
+                case .changed:
+                    self.flash(symbol: "xmark.circle.fill",
+                               tooltip: "Zwischenablage geändert – Text nicht kopiert")
+                case .failed:
+                    self.flash(symbol: "xmark.circle.fill", tooltip: "Text konnte nicht kopiert werden")
                     NSSound.beep()
-                } else {
-                    let pb = NSPasteboard.general
-                    pb.clearContents()
-                    pb.setString(text, forType: .string)
-                    self.flash(symbol: "checkmark.circle.fill",
-                               tooltip: "Text in Zwischenablage kopiert")
                 }
             }
-        }
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = true
-        request.recognitionLanguages = ["de-DE", "en-US"]
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-            try? handler.perform([request])
         }
     }
 
-    func imageFromPasteboard() -> CGImage? {
-        let pb = NSPasteboard.general
+    private func imageFromPasteboard(_ pasteboard: NSPasteboard) -> CGImage? {
         for type in [NSPasteboard.PasteboardType.png, .tiff] {
-            if let data = pb.data(forType: type),
-               let img = NSImage(data: data),
-               let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-                return cg
+            if let data = pasteboard.data(forType: type),
+               let image = NSImage(data: data),
+               let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+                return cgImage
             }
         }
-        if let img = NSImage(pasteboard: pb),
-           let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-            return cg
+        if let image = NSImage(pasteboard: pasteboard),
+           let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            return cgImage
         }
-        if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
-           let url = urls.first,
-           let img = NSImage(contentsOf: url),
-           let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-            return cg
+        if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
+           let url = urls.first, url.isFileURL,
+           let image = NSImage(contentsOf: url),
+           let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            return cgImage
         }
         return nil
     }
 
-    func setIcon(symbol: String) {
-        statusItem.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
-    }
-
-    func flash(symbol: String, tooltip: String) {
+    private func flash(symbol: String, tooltip: String) {
         guard let button = statusItem.button else { return }
+        feedbackTask?.cancel()
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)
         button.toolTip = tooltip
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) { [weak self] in
-            guard let self = self else { return }
+        feedbackTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(1300)) }
+            catch { return }
+            guard let self else { return }
             button.image = self.defaultImage
-            button.toolTip = "Klick: Bild aus Zwischenablage in Text umwandeln"
+            button.toolTip = self.defaultTooltip
         }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        feedbackTask?.cancel()
+        ocrTask?.cancel()
     }
 }
 

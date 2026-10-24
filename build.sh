@@ -1,22 +1,20 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 cd "$(dirname "$0")"
 
-APP="Bild zu Text.app"
+APP="build/Bild zu Text.app"
 CONTENTS="$APP/Contents"
+mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" build/module-cache
 
-rm -rf "$APP"
-mkdir -p "$CONTENTS/MacOS"
-mkdir -p "$CONTENTS/Resources"
+xcrun swiftc -swift-version 6 -O \
+    -target "$(uname -m)-apple-macosx13.0" \
+    -module-cache-path "$PWD/build/module-cache" \
+    -framework Cocoa -framework Vision \
+    src/OCR.swift src/main.swift -o "$CONTENTS/MacOS/BildZuText"
+
 cp src/Info.plist "$CONTENTS/Info.plist"
 cp src/AppIcon.icns "$CONTENTS/Resources/AppIcon.icns"
-
-swiftc -O \
-    -framework Cocoa \
-    -framework Vision \
-    src/main.swift \
-    -o "$CONTENTS/MacOS/BildZuText"
-
-codesign --force --deep --sign - "$APP" 2>/dev/null || true
-
-echo "Fertig: $(pwd)/$APP"
+plutil -lint "$CONTENTS/Info.plist"
+codesign --force --sign - "$APP"
+codesign --verify --strict "$APP"
+printf 'App: %s/%s\n' "$PWD" "$APP"

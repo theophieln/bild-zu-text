@@ -1,3 +1,5 @@
+build/
+dist/
 Bild zu Text.app/
 *.dmg
 .DS_Store
